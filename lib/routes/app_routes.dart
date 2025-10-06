@@ -5,7 +5,7 @@ import '../presentation/connection_status/connection_status.dart';
 import '../presentation/chat_interface/chat_interface.dart';
 import '../presentation/message_history/message_history.dart';
 import '../presentation/bluetooth_permissions/bluetooth_permissions.dart';
-import '../presentation/connected_devices/connected_devices_screen.dart';
+import '../presentation/connected_devices/connected_devices.dart';
 
 class AppRoutes {
   // TODO: Add your routes here
@@ -26,7 +26,7 @@ class AppRoutes {
     chatInterface: (context) => const ChatInterface(),
     messageHistory: (context) => const MessageHistory(),
     bluetoothPermissions: (context) => const BluetoothPermissions(),
-    connectedDevices: (context) => const ConnectedDevicesScreen(),
+    connectedDevices: (context) => const ConnectedDevices(),
     // TODO: Add your other routes here
   };
 }

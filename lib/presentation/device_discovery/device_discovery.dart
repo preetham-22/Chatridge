@@ -1,9 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:sizer/sizer.dart';
 
 import '../../core/app_export.dart';
-import './widgets/connection_dialog_widget.dart';
+import '../../services/bluetooth_service.dart';
+import './widgets/connection_dialog_widget.dart' hide DeviceCardWidget;
 import './widgets/device_card_widget.dart';
 import './widgets/empty_state_widget.dart';
 import './widgets/manual_pairing_dialog_widget.dart';
@@ -19,139 +23,78 @@ class DeviceDiscovery extends StatefulWidget {
 class _DeviceDiscoveryState extends State<DeviceDiscovery>
     with TickerProviderStateMixin {
   late TabController _tabController;
+  final BluetoothService _bluetoothService = BluetoothService();
+  StreamSubscription<List<ScanResult>>? _scanResultsSubscription;
+  StreamSubscription<bool>? _isScanningSubscription;
   bool _isScanning = false;
-  bool _isRefreshing = false;
-  List<Map<String, dynamic>> _discoveredDevices = [];
-
-  // Mock data for discovered devices
-  final List<Map<String, dynamic>> _mockDevices = [
-    {
-      "id": "1",
-      "name": "ESP32-BlueBridge-01",
-      "macAddress": "24:6F:28:AB:CD:EF",
-      "type": "ESP32",
-      "signalStrength": 4,
-      "isConnected": false,
-      "lastSeen": DateTime.now().subtract(const Duration(seconds: 30)),
-      "deviceInfo": {
-        "firmware": "v2.1.0",
-        "features": ["Mesh Network", "Encryption", "Low Power Mode"]
-      }
-    },
-    {
-      "id": "2",
-      "name": "Arduino-Nano-33-BLE",
-      "macAddress": "A4:CF:12:34:56:78",
-      "type": "Arduino",
-      "signalStrength": 3,
-      "isConnected": true,
-      "lastSeen": DateTime.now().subtract(const Duration(minutes: 2)),
-      "deviceInfo": {
-        "firmware": "v1.8.3",
-        "features": ["Basic Messaging", "Status LED"]
-      }
-    },
-    {
-      "id": "3",
-      "name": "ESP32-Outdoor-Relay",
-      "macAddress": "30:AE:A4:12:34:56",
-      "type": "ESP32",
-      "signalStrength": 2,
-      "isConnected": false,
-      "lastSeen": DateTime.now().subtract(const Duration(minutes: 5)),
-      "deviceInfo": {
-        "firmware": "v2.0.1",
-        "features": ["Weather Resistant", "Extended Range"]
-      }
-    },
-    {
-      "id": "4",
-      "name": "BlueBridge-Hub-Main",
-      "macAddress": "DC:A6:32:98:76:54",
-      "type": "ESP32",
-      "signalStrength": 4,
-      "isConnected": false,
-      "lastSeen": DateTime.now().subtract(const Duration(minutes: 1)),
-      "deviceInfo": {
-        "firmware": "v2.2.0",
-        "features": ["Multi-Device Hub", "Message Routing", "Backup Storage"]
-      }
-    }
-  ];
+  List<ScanResult> _discoveredDevices = [];
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
-    _startInitialScan();
+
+    // Listen to scan results
+    _scanResultsSubscription = _bluetoothService.scanResults.listen((results) {
+      if (mounted) {
+        setState(() {
+          // Filter out devices with no name
+          _discoveredDevices =
+              results.where((r) => r.device.platformName.isNotEmpty).toList();
+        });
+      }
+    });
+
+    // Listen to scanning state
+    _isScanningSubscription = _bluetoothService.isScanning.listen((isScanning) {
+      if (mounted) {
+        setState(() {
+          _isScanning = isScanning;
+        });
+      }
+    });
+
+    _refreshDevices();
   }
 
   @override
   void dispose() {
     _tabController.dispose();
+    _scanResultsSubscription?.cancel();
+    _isScanningSubscription?.cancel();
+    _bluetoothService.stopScan();
     super.dispose();
   }
 
-  Future<void> _startInitialScan() async {
-    setState(() {
-      _isScanning = true;
-      _discoveredDevices.clear();
-    });
-
-    // Simulate device discovery process
-    await Future.delayed(const Duration(seconds: 2));
-
-    if (mounted) {
-      setState(() {
-        _discoveredDevices = List.from(_mockDevices);
-        _isScanning = false;
-      });
-    }
-  }
-
   Future<void> _refreshDevices() async {
-    if (_isRefreshing) return;
-
-    setState(() {
-      _isRefreshing = true;
-    });
+    if (_isScanning) return;
 
     // Haptic feedback
     HapticFeedback.lightImpact();
 
-    // Simulate refresh with new scan
-    await Future.delayed(const Duration(seconds: 1));
-
-    if (mounted) {
-      setState(() {
-        // Simulate some devices going offline/online
-        for (var device in _discoveredDevices) {
-          if (device['id'] == '3') {
-            device['signalStrength'] = device['signalStrength'] == 2 ? 3 : 2;
-          }
-          device['lastSeen'] = DateTime.now();
-        }
-        _isRefreshing = false;
-      });
-    }
+    // Start a new scan
+    await _bluetoothService.startScan(timeout: const Duration(seconds: 5));
   }
 
-  void _connectToDevice(Map<String, dynamic> device) {
+  void _connectToDevice(BluetoothDevice device) {
+    // Convert BluetoothDevice to a Map for the dialog
+    final deviceData = {
+      "name": device.platformName,
+      "macAddress": device.remoteId.toString(),
+      "type": "Unknown", // You can add logic to determine type
+    };
+
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (context) => ConnectionDialogWidget(
-        device: device,
-        onConnect: () {
+        device: deviceData,
+        onConnect: () async {
           Navigator.of(context).pop();
-          setState(() {
-            final index =
-                _discoveredDevices.indexWhere((d) => d['id'] == device['id']);
-            if (index != -1) {
-              _discoveredDevices[index]['isConnected'] = true;
-            }
-          });
-          _showConnectionSuccess(device);
+          await _bluetoothService.connect(device);
+          _showConnectionSuccess(deviceData);
+          // Trigger a rebuild to update connection state
+          setState(() {});
         },
         onCancel: () {
           Navigator.of(context).pop();
@@ -160,18 +103,13 @@ class _DeviceDiscoveryState extends State<DeviceDiscovery>
     );
   }
 
-  void _disconnectFromDevice(Map<String, dynamic> device) {
-    setState(() {
-      final index =
-          _discoveredDevices.indexWhere((d) => d['id'] == device['id']);
-      if (index != -1) {
-        _discoveredDevices[index]['isConnected'] = false;
-      }
-    });
-
+  void _disconnectFromDevice(BluetoothDevice device) async {
+    await _bluetoothService.disconnect(device);
+    final deviceName = device.platformName;
+    setState(() {}); // Trigger rebuild
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('Disconnected from ${device['name']}'),
+        content: Text('Disconnected from $deviceName'),
         backgroundColor: AppTheme.warningLight,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
@@ -214,24 +152,24 @@ class _DeviceDiscoveryState extends State<DeviceDiscovery>
     );
   }
 
-  void _showDeviceDetails(Map<String, dynamic> device) {
+  void _showDeviceDetails(ScanResult scanResult) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (context) => _buildDeviceDetailsSheet(device),
+      builder: (context) => _buildDeviceDetailsSheet(scanResult),
     );
   }
 
-  void _showDeviceContextMenu(Map<String, dynamic> device) {
+  void _showDeviceContextMenu(ScanResult scanResult) {
     showModalBottomSheet(
       context: context,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (context) => _buildContextMenuSheet(device),
+      builder: (context) => _buildContextMenuSheet(scanResult),
     );
   }
 
@@ -252,23 +190,10 @@ class _DeviceDiscoveryState extends State<DeviceDiscovery>
 
   void _pairDeviceByMac(String macAddress) {
     // Simulate pairing process
-    final newDevice = {
-      "id": DateTime.now().millisecondsSinceEpoch.toString(),
-      "name": "Manual Device",
-      "macAddress": macAddress,
-      "type": "ESP32",
-      "signalStrength": 1,
-      "isConnected": false,
-      "lastSeen": DateTime.now(),
-      "deviceInfo": {
-        "firmware": "Unknown",
-        "features": ["Manual Pairing"]
-      }
-    };
-
-    setState(() {
-      _discoveredDevices.add(newDevice);
-    });
+    // In a real app, you would try to connect to this MAC address.
+    // This is a placeholder for now.
+    // Note: flutter_blue_plus identifies devices by a RemoteId, which might not
+    // always be the public MAC address. This feature requires more advanced handling.
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -309,7 +234,7 @@ class _DeviceDiscoveryState extends State<DeviceDiscovery>
                         const Spacer(),
                         IconButton(
                           onPressed: _refreshDevices,
-                          icon: _isRefreshing
+                          icon: _isScanning
                               ? SizedBox(
                                   width: 6.w,
                                   height: 6.w,
@@ -454,19 +379,39 @@ class _DeviceDiscoveryState extends State<DeviceDiscovery>
       padding: EdgeInsets.only(bottom: 10.h),
       itemCount: _discoveredDevices.length,
       itemBuilder: (context, index) {
-        final device = _discoveredDevices[index];
+        final scanResult = _discoveredDevices[index];
+        final device = scanResult.device;
+
+        // Convert ScanResult to the Map format expected by DeviceCardWidget
+        final deviceData = {
+          "name": device.platformName,
+          "macAddress": device.remoteId.toString(),
+          "type": "Unknown", // Can be inferred from name or advertisement data
+          "signalStrength": _getSignalStrength(scanResult.rssi),
+          "isConnected": device.isConnected,
+          "lastSeen": DateTime.now(),
+          "deviceInfo": {
+            "firmware": "Unknown",
+            "features": ["BLE"]
+          }
+        };
+
         return DeviceCardWidget(
-          device: device,
+          device: deviceData,
           onConnect: () => _connectToDevice(device),
           onDisconnect: () => _disconnectFromDevice(device),
-          onTap: () => _showDeviceDetails(device),
-          onLongPress: () => _showDeviceContextMenu(device),
+          onTap: () => _showDeviceDetails(scanResult),
+          onLongPress: () => _showDeviceContextMenu(scanResult),
         );
       },
     );
   }
 
-  Widget _buildDeviceDetailsSheet(Map<String, dynamic> device) {
+  Widget _buildDeviceDetailsSheet(ScanResult scanResult) {
+    final device = scanResult.device;
+    final isConnected = device.isConnected;
+    final signalStrength = _getSignalStrength(scanResult.rssi);
+
     return Container(
       padding: EdgeInsets.all(6.w),
       child: Column(
@@ -496,9 +441,10 @@ class _DeviceDiscoveryState extends State<DeviceDiscovery>
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: CustomIconWidget(
-                  iconName: device['type']?.toLowerCase() == 'arduino'
-                      ? 'memory'
-                      : 'developer_board',
+                  iconName:
+                      device.platformName.toLowerCase().contains('arduino')
+                          ? 'memory'
+                          : 'developer_board',
                   color: AppTheme.lightTheme.primaryColor,
                   size: 8.w,
                 ),
@@ -509,13 +455,13 @@ class _DeviceDiscoveryState extends State<DeviceDiscovery>
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      device['name'] ?? 'Unknown Device',
+                      device.platformName,
                       style: AppTheme.lightTheme.textTheme.titleLarge?.copyWith(
                         fontWeight: FontWeight.w600,
                       ),
                     ),
                     Text(
-                      device['macAddress'] ?? 'XX:XX:XX:XX:XX:XX',
+                      device.remoteId.toString(),
                       style: AppTheme.lightTheme.textTheme.bodyMedium?.copyWith(
                         color: AppTheme.textSecondaryLight,
                         fontFamily: 'monospace',
@@ -528,15 +474,17 @@ class _DeviceDiscoveryState extends State<DeviceDiscovery>
           ),
           SizedBox(height: 4.h),
           // Device Info
-          _buildInfoRow('Type', device['type'] ?? 'Unknown'),
-          _buildInfoRow(
-              'Signal Strength', '${device['signalStrength']}/4 bars'),
-          _buildInfoRow(
-              'Status', device['isConnected'] ? 'Connected' : 'Available'),
-          _buildInfoRow('Last Seen', _formatLastSeen(device['lastSeen'])),
-          if (device['deviceInfo'] != null) ...[
-            _buildInfoRow(
-                'Firmware', device['deviceInfo']['firmware'] ?? 'Unknown'),
+          _buildInfoRow('Type', _getDeviceTypeFromName(device.platformName)),
+          _buildInfoRow('Signal Strength',
+              '$signalStrength/4 bars (RSSI: ${scanResult.rssi} dBm)'),
+          _buildInfoRow('Status', isConnected ? 'Connected' : 'Available'),
+          _buildInfoRow('Last Seen', _formatLastSeen(DateTime.now())),
+          if (scanResult.advertisementData.serviceUuids.isNotEmpty) ...[
+            _buildInfoRow('Service UUIDs',
+                scanResult.advertisementData.serviceUuids.join('\n')),
+          ],
+          if (true) ...[
+            // Placeholder for real features
             SizedBox(height: 2.h),
             Text(
               'Features',
@@ -548,22 +496,21 @@ class _DeviceDiscoveryState extends State<DeviceDiscovery>
             Wrap(
               spacing: 2.w,
               runSpacing: 1.h,
-              children:
-                  (device['deviceInfo']['features'] as List<String>? ?? [])
-                      .map((feature) => Chip(
-                            label: Text(
-                              feature,
-                              style: AppTheme.lightTheme.textTheme.labelSmall,
-                            ),
-                            backgroundColor: AppTheme.lightTheme.primaryColor
-                                .withValues(alpha: 0.1),
-                          ))
-                      .toList(),
+              children: (["BLE", "GATT"]) // Example features
+                  .map((feature) => Chip(
+                        label: Text(
+                          feature,
+                          style: AppTheme.lightTheme.textTheme.labelSmall,
+                        ),
+                        backgroundColor: AppTheme.lightTheme.primaryColor
+                            .withValues(alpha: 0.1),
+                      ))
+                  .toList(),
             ),
           ],
           SizedBox(height: 4.h),
           // Connected Devices Section for Hub devices
-          if (_canShowConnectedDevices(device)) ...[
+          if (_canShowConnectedDevices(device.platformName)) ...[
             Row(
               children: [
                 CustomIconWidget(
@@ -597,7 +544,9 @@ class _DeviceDiscoveryState extends State<DeviceDiscovery>
                   Navigator.pushNamed(
                     context,
                     '/connected-devices',
-                    arguments: {'device': device},
+                    arguments: {
+                      'device': device
+                    }, // Needs adjustment for BluetoothDevice
                   );
                 },
                 icon: CustomIconWidget(
@@ -630,17 +579,17 @@ class _DeviceDiscoveryState extends State<DeviceDiscovery>
             width: double.infinity,
             height: 6.h,
             child: ElevatedButton(
-              onPressed: device['isConnected']
+              onPressed: isConnected
                   ? () {
                       Navigator.pop(context);
                       Navigator.pushNamed(context, '/chat-interface');
                     }
                   : () {
                       Navigator.pop(context);
-                      _connectToDevice(device);
+                      _connectToDevice(scanResult.device);
                     },
               child: Text(
-                device['isConnected'] ? 'Open Chat' : 'Connect Device',
+                isConnected ? 'Open Chat' : 'Connect Device',
                 style: AppTheme.lightTheme.textTheme.labelLarge?.copyWith(
                   color: Colors.white,
                   fontWeight: FontWeight.w600,
@@ -653,20 +602,16 @@ class _DeviceDiscoveryState extends State<DeviceDiscovery>
     );
   }
 
-  bool _canShowConnectedDevices(Map<String, dynamic> device) {
-    final deviceName = device['name'] as String? ?? '';
-    final features = device['deviceInfo']?['features'] as List<String>? ?? [];
-
+  bool _canShowConnectedDevices(String deviceName) {
     // Show for devices that have hub capabilities
     return deviceName.toLowerCase().contains('hub') ||
-        deviceName.toLowerCase().contains('bridge') ||
-        features.any((feature) =>
-            feature.toLowerCase().contains('hub') ||
-            feature.toLowerCase().contains('mesh') ||
-            feature.toLowerCase().contains('routing'));
+        deviceName.toLowerCase().contains('bridge');
   }
 
-  Widget _buildContextMenuSheet(Map<String, dynamic> device) {
+  Widget _buildContextMenuSheet(ScanResult scanResult) {
+    final device = scanResult.device;
+    final deviceData = {'id': device.remoteId.toString()}; // For compatibility
+
     return Container(
       padding: EdgeInsets.all(6.w),
       child: Column(
@@ -707,7 +652,8 @@ class _DeviceDiscoveryState extends State<DeviceDiscovery>
             onTap: () {
               Navigator.pop(context);
               setState(() {
-                _discoveredDevices.removeWhere((d) => d['id'] == device['id']);
+                _discoveredDevices
+                    .removeWhere((r) => r.device.remoteId == device.remoteId);
               });
             },
           ),
@@ -772,6 +718,27 @@ class _DeviceDiscoveryState extends State<DeviceDiscovery>
     } else {
       return '${difference.inDays}d ago';
     }
+  }
+
+  int _getSignalStrength(int rssi) {
+    if (rssi >= -60) {
+      return 4; // Excellent
+    } else if (rssi >= -70) {
+      return 3; // Good
+    } else if (rssi >= -80) {
+      return 2; // Fair
+    } else {
+      return 1; // Weak
+    }
+  }
+
+  String _getDeviceTypeFromName(String name) {
+    if (name.toLowerCase().contains('esp32')) {
+      return 'ESP32';
+    } else if (name.toLowerCase().contains('arduino')) {
+      return 'Arduino';
+    }
+    return 'Generic BLE';
   }
 
   Widget _buildMessagesTab() {
